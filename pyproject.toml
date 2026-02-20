@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mint-pipeline"
+version = "0.1.0"
+description = "Google Sheets driven multi-agent pipeline runner for agent-based project workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "google-api-python-client>=2.169.0",
+  "google-auth>=2.35.0",
+]
+
+[project.scripts]
+mint = "mint.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mint*"]
