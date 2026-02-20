@@ -50,6 +50,8 @@ class StatusAgent:
             r"'session_id'\s*:\s*'([A-Za-z0-9._:-]+)'",
             r"/sessions/([A-Za-z0-9._:-]+)",
             r"\bcodex\s+resume\s+([A-Za-z0-9._:-]+)",
+            r"\bclaude\s+(?:-r|--resume)\s+([A-Za-z0-9._:-]+)",
+            r"\b(?:-r|--resume)\s+([A-Za-z0-9._:-]{8,})",
             r"\bresume\s+([0-9a-f]{8}-[0-9a-f-]{27,})",
             r"(?:session[_\s-]?id)\s*[:=]\s*([A-Za-z0-9._-]+)",
             r"(?:conversation[_\s-]?id)\s*[:=]\s*([A-Za-z0-9._-]+)",
@@ -72,13 +74,15 @@ class ExecutionAgent:
 
     def run(self, command: str, prompt: str, session_id: str = "") -> ExecutionResult:
         built = self._build_command(command=command, prompt=prompt, session_id=session_id)
-        pre_session_id = self._latest_codex_session_id()
+        provider = self._command_provider(command)
+        pre_session_id = self._latest_codex_session_id() if provider == "codex" else ""
 
         if self._command_prefers_tty(built):
             return self._run_with_tty(
                 built=built,
                 session_id=session_id,
                 pre_session_id=pre_session_id,
+                provider=provider,
             )
 
         try:
@@ -88,17 +92,20 @@ class ExecutionAgent:
                     built=built,
                     session_id=session_id,
                     pre_session_id=pre_session_id,
+                    provider=provider,
                 )
             status = self.status_agent.decide(return_code, output)
             extracted_session = self.status_agent.extract_session_id(output)
-            post_session_id = self._latest_codex_session_id()
-            if not extracted_session and post_session_id and post_session_id != pre_session_id:
+            post_session_id = self._latest_codex_session_id() if provider == "codex" else ""
+            if provider == "codex" and not extracted_session and post_session_id and post_session_id != pre_session_id:
                 extracted_session = post_session_id
             thoughts = output
-            session_for_message = extracted_session or session_id
-            if not session_for_message and post_session_id and post_session_id != pre_session_id:
-                session_for_message = post_session_id
-            if session_for_message:
+            session_for_message = ""
+            if provider == "codex":
+                session_for_message = extracted_session or session_id
+                if not session_for_message and post_session_id and post_session_id != pre_session_id:
+                    session_for_message = post_session_id
+            if session_for_message and provider == "codex":
                 codex_message = self._latest_codex_assistant_message(session_for_message)
                 if codex_message:
                     thoughts = codex_message
@@ -144,6 +151,7 @@ class ExecutionAgent:
         built: str,
         session_id: str,
         pre_session_id: str = "",
+        provider: str = "generic",
     ) -> ExecutionResult:
         try:
             completed = subprocess.run(
@@ -152,12 +160,14 @@ class ExecutionAgent:
                 text=True,
                 timeout=self.timeout_seconds,
             )
-            post_session_id = self._latest_codex_session_id()
-            detected_session_id = self._pick_session_id(
-                previous=pre_session_id,
-                latest=post_session_id,
-                fallback=session_id,
-            )
+            detected_session_id = session_id
+            if provider == "codex":
+                post_session_id = self._latest_codex_session_id()
+                detected_session_id = self._pick_session_id(
+                    previous=pre_session_id,
+                    latest=post_session_id,
+                    fallback=session_id,
+                )
             if completed.returncode == 0:
                 output = "Command completed in terminal mode."
             else:
@@ -166,7 +176,7 @@ class ExecutionAgent:
                 output += f"\nSession ID: {detected_session_id}"
             status = self.status_agent.decide(completed.returncode, output)
             thoughts = output
-            if detected_session_id:
+            if detected_session_id and provider == "codex":
                 codex_message = self._latest_codex_assistant_message(detected_session_id)
                 if codex_message:
                     thoughts = codex_message
@@ -211,7 +221,25 @@ class ExecutionAgent:
         tokens = text.split()
         if not tokens:
             return False
-        return "exec" in tokens or "review" in tokens
+        return (
+            "exec" in tokens
+            or "review" in tokens
+            or "-p" in tokens
+            or "--print" in tokens
+        )
+
+    @staticmethod
+    def _command_provider(command: str) -> str:
+        tokens = command.strip().split()
+        if not tokens:
+            return "generic"
+        head = tokens[0].strip().strip('"').strip("'")
+        name = Path(head).name.lower()
+        if name in {"codex", "codex.exe"}:
+            return "codex"
+        if name in {"claude", "claude.exe"}:
+            return "claude"
+        return "generic"
 
     @staticmethod
     def _pick_session_id(previous: str, latest: str, fallback: str) -> str:
@@ -319,17 +347,37 @@ class ExecutionAgent:
 
     def _build_command(self, command: str, prompt: str, session_id: str) -> str:
         escaped_prompt = self._escape(prompt)
+        provider = self._command_provider(command)
+        lower_command = command.strip().lower()
+
         if "{prompt}" in command:
             built = command.replace("{prompt}", escaped_prompt)
             if "{session_id}" in built:
                 built = built.replace("{session_id}", session_id)
             elif session_id:
-                built = f'{built} resume {session_id}'
+                if provider == "claude":
+                    built = f"{built} -r {session_id}"
+                else:
+                    built = f"{built} resume {session_id}"
             return built
+
+        if provider == "claude":
+            noninteractive_claude = "-p" in lower_command.split() or "--print" in lower_command.split()
+            base_command = command
+            if self.auto_close_after_task and not noninteractive_claude:
+                base_command = f"{command} -p"
+
+            if session_id:
+                tokens = base_command.strip().lower().split()
+                if "-r" not in tokens and "--resume" not in tokens:
+                    return f'{base_command} -r {session_id} "{escaped_prompt}"'
+                return f'{base_command} "{escaped_prompt}"'
+            return f'{base_command} "{escaped_prompt}"'
 
         if (
             self.auto_close_after_task
-            and not self._is_noninteractive_agent_command(command.strip().lower())
+            and provider == "codex"
+            and not self._is_noninteractive_agent_command(lower_command)
         ):
             if session_id:
                 return f'{command} exec resume {session_id} "{escaped_prompt}"'

@@ -29,6 +29,22 @@ It reads tasks from a sheet, runs your configured agent command, writes status/o
 - A Google Cloud service account JSON key with Sheets API access
 - A Google Sheet shared with that service account email
 
+### Supported agent commands
+
+- **Default/main:** `codex`
+- **Also supported:** `claude`
+
+Mint applies command-specific run/resume behavior:
+
+- If command is `codex` and auto-close is enabled:
+  - new task: `codex exec "<prompt>"`
+  - resume: `codex exec resume <session_id> "<prompt>"`
+- If command is `claude` and auto-close is enabled:
+  - new task: `claude -p "<prompt>"`
+  - resume: `claude -p -r <session_id> "<prompt>"`
+
+If auto-close is disabled, Mint uses interactive mode for the configured command.
+
 ---
 
 ## Installation
@@ -65,7 +81,7 @@ mint init https://docs.google.com/spreadsheets/d/<ID>/edit
 In Column A:
 
 - A3 = Prefix
-- A5 = Command
+- A5 = Command (for example `codex` or `claude`)
 - A7 = Auto Close (`true`/`false`)
 
 You can still use `mint setup prefix|command|auto_close` if you prefer CLI editing.
